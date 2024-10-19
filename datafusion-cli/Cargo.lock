@@ -1434,6 +1434,7 @@ dependencies = [
  "datafusion-physical-expr-common",
  "itertools",
  "log",
+ "num-traits",
  "paste",
  "rand",
 ]

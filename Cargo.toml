@@ -70,19 +70,13 @@ version = "42.0.0"
 ahash = { version = "0.8", default-features = false, features = [
     "runtime-rng",
 ] }
-arrow = { version = "53.1.0", features = [
-    "prettyprint",
-] }
+arrow = { version = "53.1.0", features = ["prettyprint"] }
 arrow-array = { version = "53.1.0", default-features = false, features = [
     "chrono-tz",
 ] }
 arrow-buffer = { version = "53.1.0", default-features = false }
-arrow-flight = { version = "53.1.0", features = [
-    "flight-sql-experimental",
-] }
-arrow-ipc = { version = "53.1.0", default-features = false, features = [
-    "lz4",
-] }
+arrow-flight = { version = "53.1.0", features = ["flight-sql-experimental"] }
+arrow-ipc = { version = "53.1.0", default-features = false, features = ["lz4"] }
 arrow-ord = { version = "53.1.0", default-features = false }
 arrow-schema = { version = "53.1.0", default-features = false }
 arrow-string = { version = "53.1.0", default-features = false }
