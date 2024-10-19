@@ -40,6 +40,7 @@ pub mod except;
 pub mod expr_ext;
 pub mod extract;
 pub mod flatten;
+pub mod greatest;
 pub mod length;
 pub mod make_array;
 pub mod map;
@@ -109,6 +110,7 @@ pub mod expr_fn {
     pub use super::sort::array_sort;
     pub use super::string::array_to_string;
     pub use super::string::string_to_array;
+    pub use super::greatest::greatest;
 }
 
 /// Return all default nested type functions
@@ -157,6 +159,7 @@ pub fn all_default_nested_functions() -> Vec<Arc<ScalarUDF>> {
         map_extract::map_extract_udf(),
         map_keys::map_keys_udf(),
         map_values::map_values_udf(),
+        greatest::greatest_udf(),
     ]
 }
 
