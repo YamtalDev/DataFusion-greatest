@@ -15,8 +15,6 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#![deny(clippy::clone_on_ref_ptr)]
-
 //! [`ScalarUDFImpl`] definitions for the `greatest` function.
 
 use crate::utils::make_scalar_function;
@@ -313,69 +311,49 @@ fn compute_greatest_large_utf8(arrays: &[ArrayRef]) -> Result<ArrayRef> {
 }
 
 fn compute_greatest_list(arrays: &[ArrayRef]) -> Result<ArrayRef> {
-    if arrays.is_empty() {
-        return Err(DataFusionError::Execution(
-            "No arrays provided for greatest_list computation".to_string(),
-        ));
-    }
+    // Assuming the list elements are Int32Array for simplicity
+    // You may need to generalize this based on element type
+    let arrays = arrays
+        .iter()
+        .map(|array| {
+            array.as_any().downcast_ref::<ListArray>().ok_or_else(|| {
+                DataFusionError::Execution("Failed to downcast array".to_string())
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
 
-    // Determine the element type from the first array
-    let first_array =
-        arrays[0]
-            .as_any()
-            .downcast_ref::<ListArray>()
-            .ok_or_else(|| {
-                DataFusionError::Execution("Failed to downcast to ListArray".to_string())
-            })?;
+    let num_rows = arrays[0].len();
+    let value_builder = Int32Builder::new();
+    let mut builder = ListBuilder::new(value_builder);
 
-    let element_type = first_array.value_type().clone();
-
-    // Create a builder based on the element type
-    let mut builder = ListBuilder::new(make_builder(&element_type, arrays[0].len())?);
-
-    for row in 0..arrays[0].len() {
-        let mut max_element: Option<ColumnarValue> = None;
-
-        for array in arrays {
+    for row in 0..num_rows {
+        let mut max_value: Option<i32> = None;
+        for array in &arrays {
             if array.is_valid(row) {
-                let list =
-                    array.as_any().downcast_ref::<ListArray>().ok_or_else(|| {
+                let values = array.value(row);
+                let value_array = values
+                    .as_any()
+                    .downcast_ref::<Int32Array>()
+                    .ok_or_else(|| {
                         DataFusionError::Execution(
-                            "Failed to downcast to ListArray".to_string(),
+                            "Failed to downcast value array".to_string(),
                         )
                     })?;
 
-                let elements = list.value(row);
-                let element_array = elements.clone(); // Clone to avoid borrowing issues
-
-                // Determine the greatest element in the list
-                let current_max = greatest_inner(&[element_array.clone()])?;
-                max_element = match (max_element, current_max) {
-                    (None, ColumnarValue::Array(arr)) => {
-                        Some(ColumnarValue::Array(arr.clone()))
+                for index in 0..value_array.len() {
+                    if value_array.is_valid(index) {
+                        let value = value_array.value(index);
+                        max_value = Some(
+                            max_value.map_or(value, |current_max| current_max.max(value)),
+                        );
                     }
-                    (
-                        Some(ColumnarValue::Array(existing_arr)),
-                        ColumnarValue::Array(new_arr),
-                    ) => {
-                        // Compare existing_arr and new_arr
-                        // Assuming single-element arrays for simplicity
-                        if existing_arr.value(0) < new_arr.value(0) {
-                            Some(ColumnarValue::Array(new_arr.clone()))
-                        } else {
-                            Some(ColumnarValue::Array(existing_arr.clone()))
-                        }
-                    }
-                    (Some(_), ColumnarValue::Scalar(_)) => max_element, // Ignore scalar for lists
-                    _ => max_element,
-                };
+                }
             }
         }
 
-        if let Some(ColumnarValue::Array(arr)) = max_element {
-            // Append the array to the builder
-            builder.values().append_array(&arr)?;
-            builder.append(true)?;
+        if let Some(value) = max_value {
+            builder.values().append_value(value);
+            builder.append(true);
         } else {
             builder.append(false);
         }
@@ -385,241 +363,77 @@ fn compute_greatest_list(arrays: &[ArrayRef]) -> Result<ArrayRef> {
 }
 
 fn compute_greatest_struct(arrays: &[ArrayRef]) -> Result<ArrayRef> {
-    if arrays.is_empty() {
-        return Err(DataFusionError::Execution(
-            "No arrays provided for greatest_struct computation".to_string(),
-        ));
-    }
+    let arrays = arrays
+        .iter()
+        .map(|array| {
+            array.as_any().downcast_ref::<StructArray>().ok_or_else(|| {
+                DataFusionError::Execution("Failed to downcast array".to_string())
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
 
-    // Ensure all arrays are StructArrays and have the same schema
-    let first_array = arrays[0]
-        .as_any()
-        .downcast_ref::<StructArray>()
-        .ok_or_else(|| {
-            DataFusionError::Execution("Failed to downcast to StructArray".to_string())
-        })?;
+    let num_rows = arrays[0].len();
+    let fields = arrays[0].data_type().clone();
+    let field_types = match fields {
+        DataType::Struct(fields) => fields,
+        _ => {
+            return Err(DataFusionError::Execution(
+                "Expected Struct data type".to_string(),
+            ))
+        }
+    };
 
-    let fields = first_array.fields();
-    let num_fields = fields.len();
-    let num_rows = first_array.len();
-
-    // Create builders for each field based on their data types
-    let mut field_builders: Vec<Box<dyn ArrayBuilder>> = fields
+    // Create field builders
+    let field_builders: Vec<Box<dyn ArrayBuilder>> = field_types
         .iter()
         .map(|field| make_builder(field.data_type(), num_rows))
         .collect::<Result<_>>()?;
 
-    let mut struct_builder = StructBuilder::new(fields.clone(), field_builders);
+    let mut builder = StructBuilder::new(field_types, field_builders);
 
     for row in 0..num_rows {
         let mut append_null = true;
 
-        for field_idx in 0..num_fields {
-            // Gather all arrays for this field across input arrays
-            let field_arrays = arrays
-                .iter()
-                .map(|array| {
-                    let struct_array = array
+        for field_index in 0..builder.num_fields() {
+            let field_builder =
+                builder.field_builder::<Int64Builder>(field_index).unwrap();
+            let mut max_value: Option<i64> = None;
+
+            for array in &arrays {
+                let column = array.column(field_index);
+                if column.is_valid(row) {
+                    let value = column
                         .as_any()
-                        .downcast_ref::<StructArray>()
+                        .downcast_ref::<Int64Array>()
                         .ok_or_else(|| {
                             DataFusionError::Execution(
-                                "Failed to downcast to StructArray".to_string(),
+                                "Failed to downcast column array".to_string(),
                             )
-                        })?;
-                    Ok(struct_array.column(field_idx).clone())
-                })
-                .collect::<Result<Vec<_>>>()?;
+                        })?
+                        .value(row);
 
-            // Apply greatest_inner on the field arrays
-            let greatest = greatest_inner(&field_arrays)?;
-
-            match greatest {
-                ColumnarValue::Array(arr) => {
-                    // Determine the field's data type
-                    let field_type = &fields[field_idx].data_type();
-
-                    // Downcast the array to its concrete type based on field_type
-                    match field_type {
-                        DataType::Int8 => {
-                            let arr = arr
-                                .as_any()
-                                .downcast_ref::<Int8Array>()
-                                .ok_or_else(|| {
-                                    DataFusionError::Execution(
-                                        "Failed to downcast to Int8Array".to_string(),
-                                    )
-                                })?;
-                            struct_builder
-                                .field_builder::<Int8Builder>(field_idx)?
-                                .append_option(arr.get(row))?;
-                        }
-                        DataType::Int16 => {
-                            let arr = arr
-                                .as_any()
-                                .downcast_ref::<Int16Array>()
-                                .ok_or_else(|| {
-                                    DataFusionError::Execution(
-                                        "Failed to downcast to Int16Array".to_string(),
-                                    )
-                                })?;
-                            struct_builder
-                                .field_builder::<Int16Builder>(field_idx)?
-                                .append_option(arr.get(row))?;
-                        }
-                        DataType::Int32 => {
-                            let arr = arr
-                                .as_any()
-                                .downcast_ref::<Int32Array>()
-                                .ok_or_else(|| {
-                                    DataFusionError::Execution(
-                                        "Failed to downcast to Int32Array".to_string(),
-                                    )
-                                })?;
-                            struct_builder
-                                .field_builder::<Int32Builder>(field_idx)?
-                                .append_option(arr.get(row))?;
-                        }
-                        DataType::Int64 => {
-                            let arr = arr
-                                .as_any()
-                                .downcast_ref::<Int64Array>()
-                                .ok_or_else(|| {
-                                    DataFusionError::Execution(
-                                        "Failed to downcast to Int64Array".to_string(),
-                                    )
-                                })?;
-                            struct_builder
-                                .field_builder::<Int64Builder>(field_idx)?
-                                .append_option(arr.get(row))?;
-                        }
-                        DataType::UInt8 => {
-                            let arr = arr
-                                .as_any()
-                                .downcast_ref::<UInt8Array>()
-                                .ok_or_else(|| {
-                                    DataFusionError::Execution(
-                                        "Failed to downcast to UInt8Array".to_string(),
-                                    )
-                                })?;
-                            struct_builder
-                                .field_builder::<UInt8Builder>(field_idx)?
-                                .append_option(arr.get(row))?;
-                        }
-                        DataType::UInt16 => {
-                            let arr = arr
-                                .as_any()
-                                .downcast_ref::<UInt16Array>()
-                                .ok_or_else(|| {
-                                    DataFusionError::Execution(
-                                        "Failed to downcast to UInt16Array".to_string(),
-                                    )
-                                })?;
-                            struct_builder
-                                .field_builder::<UInt16Builder>(field_idx)?
-                                .append_option(arr.get(row))?;
-                        }
-                        DataType::UInt32 => {
-                            let arr = arr
-                                .as_any()
-                                .downcast_ref::<UInt32Array>()
-                                .ok_or_else(|| {
-                                    DataFusionError::Execution(
-                                        "Failed to downcast to UInt32Array".to_string(),
-                                    )
-                                })?;
-                            struct_builder
-                                .field_builder::<UInt32Builder>(field_idx)?
-                                .append_option(arr.get(row))?;
-                        }
-                        DataType::UInt64 => {
-                            let arr = arr
-                                .as_any()
-                                .downcast_ref::<UInt64Array>()
-                                .ok_or_else(|| {
-                                    DataFusionError::Execution(
-                                        "Failed to downcast to UInt64Array".to_string(),
-                                    )
-                                })?;
-                            struct_builder
-                                .field_builder::<UInt64Builder>(field_idx)?
-                                .append_option(arr.get(row))?;
-                        }
-                        DataType::Float32 => {
-                            let arr = arr
-                                .as_any()
-                                .downcast_ref::<Float32Array>()
-                                .ok_or_else(|| {
-                                    DataFusionError::Execution(
-                                        "Failed to downcast to Float32Array".to_string(),
-                                    )
-                                })?;
-                            struct_builder
-                                .field_builder::<Float32Builder>(field_idx)?
-                                .append_option(arr.get(row))?;
-                        }
-                        DataType::Float64 => {
-                            let arr = arr
-                                .as_any()
-                                .downcast_ref::<Float64Array>()
-                                .ok_or_else(|| {
-                                    DataFusionError::Execution(
-                                        "Failed to downcast to Float64Array".to_string(),
-                                    )
-                                })?;
-                            struct_builder
-                                .field_builder::<Float64Builder>(field_idx)?
-                                .append_option(arr.get(row))?;
-                        }
-                        DataType::Utf8 => {
-                            let arr = arr
-                                .as_any()
-                                .downcast_ref::<StringArray>()
-                                .ok_or_else(|| {
-                                    DataFusionError::Execution(
-                                        "Failed to downcast to StringArray".to_string(),
-                                    )
-                                })?;
-                            struct_builder
-                                .field_builder::<StringBuilder>(field_idx)?
-                                .append_option(arr.get(row))?;
-                        }
-                        DataType::LargeUtf8 => {
-                            let arr = arr
-                                .as_any()
-                                .downcast_ref::<LargeStringArray>()
-                                .ok_or_else(|| {
-                                    DataFusionError::Execution(
-                                        "Failed to downcast to LargeStringArray"
-                                            .to_string(),
-                                    )
-                                })?;
-                            struct_builder
-                                .field_builder::<LargeStringBuilder>(field_idx)?
-                                .append_option(arr.get(row))?;
-                        }
-                        // Add more data types as needed
-                        _ => {
-                            return Err(DataFusionError::NotImplemented(format!(
-                                "Greatest function not implemented for struct field data type {:?}",
-                                field_type
-                            )));
-                        }
-                    }
-                    append_null = false;
+                    max_value = Some(
+                        max_value.map_or(value, |current_max| current_max.max(value)),
+                    );
                 }
-                ColumnarValue::Scalar(_) => {
-                    // Handle scalar if needed
-                    // For simplicity, we'll skip scalar handling in structs
-                }
+            }
+
+            if let Some(value) = max_value {
+                field_builder.append_value(value);
+                append_null = false;
+            } else {
+                field_builder.append_null();
             }
         }
 
-        // After processing all fields for the row
-        struct_builder.append(append_null)?;
+        if append_null {
+            builder.append(false);
+        } else {
+            builder.append(true);
+        }
     }
 
-    Ok(Arc::new(struct_builder.finish()))
+    Ok(Arc::new(builder.finish()))
 }
 
 fn make_builder(data_type: &DataType, capacity: usize) -> Result<Box<dyn ArrayBuilder>> {
